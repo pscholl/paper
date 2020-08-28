@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+#
+# papers - generate a bibtex file from a stash of pdf files, and optionally
+#          rename files accordingly.
+#
+# dependencies:
+#  - https://github.com/dusty-phillips/opterator
+#  - poppler (pdftotext command)
+#
+# usage:
+#  requires one or multiple pdfs file to operate on and prints a
+# matching bibtex entry if one can be found.
+#
+# ./papers Papers/1.5017455.pdf
+# @inproceedings{V_r_s_2017,
+# 	doi = {10.1063/1.5017455},
+# 	url = {https://doi.org/10.1063%2F1.5017455},
+# 	year = 2017,
+# 	publisher = {Author(s)},
+# 	author = {Alp{\'{a}}r Istv{\'{a}}n Vita Vörös and Zsuzsa S{\'{a}}rközi},
+# 	title = {Physics escape room as an educational tool}
+# }
+#
+# You can use GNU parallel for speeding up the retrieval of multiple pdfs:
+# parallel ./papers {} ::: Papers/* > mybibtex.bib
+#
+
+import sys,subprocess,re,json,shutil,tempfile,os
+from opterator import opterate
+from requests import get
+
+#
+# https://www.crossref.org/blog/dois-and-matching-regular-expressions/
+# https://github.com/perrette/papers/blob/master/papers/extract.py
+#
+DOI = re.compile(r'[doi,doi.org/][\s\.\:]{0,2}(10\.\d{4}[\d\:\.\n?\-\/a-z]+?)\.?[A-Z\s,\n]$', re.MULTILINE)
+
+def pdf2bibtex(pdf):
+    '''
+    read pdf file and extract bibtex via crossref
+
+    :param pdf: pdf file to read
+    '''
+    txt = subprocess\
+            .run(['pdftotext', pdf, '-l', '1', '-'],
+                 stdout=subprocess.PIPE)\
+            .stdout\
+            .decode('utf8')\
+            .lower()
+
+    try:
+        #
+        # is there a doi on the first page?
+        #
+        doi = DOI.findall(txt)[0].replace('\n', '')
+
+    except:
+        #
+        # if not take the first 200 words and do a fulltext query,
+        # and get the DOI of the first result
+        #
+        words = txt.split()[:200]
+
+        if len(words) < 5:
+            raise Exception('not enough words to do fulltext query')
+
+        req = get('https://api.crossref.org/works', params={
+                  'query.bibliographic' : '+'.join(words)})
+
+        doi = json.loads(req.text)['message']['items'][0]['DOI']
+
+    # alternatively, we could use dx.doi.org:
+    # curl -LH "Accept: text/bibliography; style=bibtex" http://dx.doi.org/10.1038/nrd842
+    try:
+        req = get("http://api.crossref.org/works/" +
+                  doi + "/transform/application/x-bibtex")
+        req.raise_for_status()
+        return req.text
+    except:
+        raise Exception(f'no DOI for {pdf}\n')
+
+def readexif(pdf):
+    return subprocess.run(\
+           'exiftool -b -bibtex'.split() + [pdf],\
+           stdout = subprocess.PIPE)\
+           .stdout\
+           .decode('utf-8')
+
+def writeexif(pdf, exif):
+    with tempfile.NamedTemporaryFile() as conf:
+        conf.write(\
+"""
+%Image::ExifTool::UserDefined = (
+  'Image::ExifTool::PDF::Info' => {
+     bibtex => { Writable => 'string', },
+  },);
+1; # end
+""".encode('utf-8'))
+
+        conf.flush()
+        subprocess.run(\
+            f'exiftool -config {conf.name}'.split() +\
+            [ f'-bibtex={exif}', pdf ])
+
+
+@opterate
+def main(bibtex='-', rename=False, force=False, *pdfs):
+    '''
+    extracts DOI identifiers from pdf files and uses crossref
+    for generating a bibtex entry.
+
+    :param bibtex: output files, defaults to stdout
+    :param rename: rename files with their title, also adds a bibtex tag
+    :param force: don't read included bibtex tag
+    :param pdfs: list of pdf files to analyze
+    '''
+    out = sys.stdout if bibtex == '-' else\
+          open(bibtex, 'w')
+
+    for pdf in pdfs:
+        bibtex = not force and readexif(pdf) or pdf2bibtex(pdf)
+
+        out.write(bibtex)
+        out.write('\n')
+
+        if not rename:
+            continue
+
+        title = re.findall(r'\stitle\s*=\s*{(.+)}', bibtex)[0]
+        fname = f'{title.replace(os.path.sep, "")}.pdf'
+
+        shutil.move(pdf, fname)
+        writeexif(fname, bibtex)
+
+
+if __name__ == "__main__":
+    main()
