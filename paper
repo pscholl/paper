@@ -59,7 +59,8 @@ def pdf2bibtex(pdf):
         # if not take the first 200 words and do a fulltext query,
         # and get the DOI of the first result
         #
-        words = txt.split()[:200]
+        words = txt.split()[:20]
+        print(words)
 
         if len(words) < 5:
             raise Exception('not enough words to do fulltext query')
